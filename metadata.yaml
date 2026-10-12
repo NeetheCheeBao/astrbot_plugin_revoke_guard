@@ -1,0 +1,12 @@
+name: astrbot_plugin_revoke_guard
+display_name: QQ群消息撤回监控（防撤回）
+desc: 支持监控QQ群被撤回的消息并将撤回通知发送至目标会话。
+version: v2.0.0
+author: NeetheCheeBao
+author_url: https://github.com/NeetheCheeBao
+repo: https://github.com/NeetheCheeBao/astrbot_plugin_revoke_guard
+support_platforms:
+  - aiocqhttp
+category: 工具
+tags: 
+  - 防撤回

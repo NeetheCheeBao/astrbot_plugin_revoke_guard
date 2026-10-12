@@ -1,0 +1,122 @@
+{
+  "monitor": {
+    "description": "监控范围设定",
+    "hint": "配置需要监控的群聊以及排除对象",
+    "type": "object",
+    "items": {
+      "monitor_mode": {
+        "type": "string",
+        "description": "监控群聊列表",
+        "hint": "所有群聊：监控全部群；白名单群聊：仅监控下方白名单；黑名单群聊：监控除黑名单外的群。",
+        "options": [
+          "所有群聊",
+          "白名单群聊",
+          "黑名单群聊"
+        ],
+        "default": "所有群聊"
+      },
+      "whitelist_groups": {
+        "type": "list",
+        "description": "白名单群聊列表",
+        "hint": "当「监控群聊列表」选择「白名单群聊」时生效。填入群号则仅监控这些群内的撤回事件。",
+        "default": []
+      },
+      "blacklist_groups": {
+        "type": "list",
+        "description": "黑名单群聊列表",
+        "hint": "当「监控群聊列表」选择「黑名单群聊」时生效。填入群号则忽略这些群聊的撤回事件。",
+        "default": []
+      },
+      "blacklist_users": {
+        "type": "list",
+        "description": "黑名单用户列表",
+        "hint": "此列表中的用户执行的撤回行为不会触发通知。",
+        "default": []
+      },
+      "ignore_keywords": {
+        "type": "list",
+        "description": "忽略关键词列表",
+        "hint": "消息文本包含列表中任一关键词时，不会被缓存和通知。",
+        "default": []
+      }
+    }
+  },
+  "target": {
+    "description": "通知目标",
+    "hint": "撤回恢复消息要发送到哪些会话。",
+    "type": "object",
+    "items": {
+      "notify_mode": {
+        "type": "string",
+        "description": "通知位置",
+        "hint": "选择撤回通知发送到私聊、群聊，或两者都发。",
+        "options": [
+          "私聊用户",
+          "发送到群聊",
+          "私聊用户和发送到群聊"
+        ],
+        "default": "发送到群聊"
+      },
+      "target_receivers": {
+        "type": "list",
+        "description": "私聊通知对象",
+        "hint": "接收撤回通知的 QQ 用户。通知位置包含「私聊用户」时生效。",
+        "default": []
+      },
+      "target_groups": {
+        "type": "list",
+        "description": "群聊通知对象",
+        "hint": "接收撤回通知的 QQ 群聊。通知位置包含「发送到群聊」时生效。",
+        "default": []
+      }
+    }
+  },
+  "cache": {
+    "description": "缓存与限制",
+    "hint": "消息缓存时长、媒体文件大小阈值。",
+    "type": "object",
+    "items": {
+      "cache_expiration_time": {
+        "type": "int",
+        "description": "缓存保留时长（秒）",
+        "hint": "消息缓存和临时文件的过期时间。",
+        "default": 300
+      },
+      "file_size_threshold_mb": {
+        "type": "int",
+        "description": "媒体大小阈值（MB）",
+        "hint": "超过阈值的视频/文件不缓存；设为 0 表示不限制。",
+        "default": 60
+      }
+    }
+  },
+  "forward": {
+    "description": "合并转发以及中转配置",
+    "hint": "针对合并转发类型消息的缓存和中转设置。",
+    "type": "object",
+    "items": {
+      "relay_mode": {
+        "type": "string",
+        "description": "中转方式",
+        "hint": "收到合并转发消息时，先中转到何处以便撤回后取回。",
+        "options": [
+          "中转给Bot自身",
+          "中转到群聊"
+        ],
+        "default": "中转给Bot自身"
+      },
+      "forward_relay_group": {
+        "type": "string",
+        "description": "中转群聊群号",
+        "hint": "当「中转方式」选择「中转到群聊」时生效。填写后会把合并转发消息先转发到该群，撤回时再转发到通知对象。",
+        "default": ""
+      },
+      "auto_recall_relay": {
+        "type": "bool",
+        "description": "自动撤回中转消息",
+        "hint": "当「中转方式」选择「中转到群聊」时生效。缓存到期后自动撤回发送至中转群的中转消息。",
+        "default": true
+      }
+    }
+  }
+}
