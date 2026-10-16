@@ -17,7 +17,7 @@
 
 首次加载后，请在 `AstrBot 后台` -> `插件页面` 找到本插件进行设置
 
-## 🗂 插件结构
+## 📂 插件结构
 
 ```
 astrbot_plugin_revoke_guard/
