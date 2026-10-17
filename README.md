@@ -40,10 +40,3 @@ astrbot_plugin_revoke_guard/
 ├── logo.png
 └── LICENSE
 ```
-
-`main.py` 只保留插件入口，业务逻辑都在 `core/` 下。这样拆分是因为 AstrBot 的两个限制：
-
-- 插件类以 `cls.__module__` 注册，**类必须定义在 `main.py`**；
-- 事件处理器的绑定按 `handler.__module__` 匹配，**带 `@filter` 装饰器的方法也必须定义在 `main.py`**。
-
-`RevokeGuard` 通过多重继承把 `core/` 里的各个 mixin 组合起来，两个处理器只做一行转发。
