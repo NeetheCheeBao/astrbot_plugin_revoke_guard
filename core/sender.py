@@ -7,7 +7,7 @@ import aiohttp
 
 from astrbot.api import logger
 
-from .components import component_to_gocq_parts
+from .components import component_to_gocq_parts, normalize_forward_nodes
 from .constants import FALLBACK_NODE_UIN
 
 
@@ -260,6 +260,51 @@ class SenderMixin:
                 )
         return None
 
+    async def _send_forward_nodes_to_target(
+        self,
+        client,
+        target_type: str,
+        target_id_str: str,
+        nodes: list,
+    ) -> str | None:
+        """把已缓存的聊天记录节点直接重建发送到目标会话。
+
+        不依赖原消息是否还存在，也不需要中转副本，是撤回恢复的首选路径。
+        """
+        if not nodes:
+            return None
+        action = (
+            "send_private_forward_msg"
+            if target_type == "private"
+            else "send_group_forward_msg"
+        )
+        params = (
+            {"user_id": int(target_id_str)}
+            if target_type == "private"
+            else {"group_id": int(target_id_str)}
+        )
+        try:
+            ret = await client.api.call_action(action, messages=nodes, **params)
+        except Exception as e:
+            logger.warning(
+                f"[{self.instance_id}] 按缓存节点重建聊天记录失败 "
+                f"-> {target_type} {target_id_str}: {e}"
+            )
+            return None
+        msg_id = None
+        if isinstance(ret, dict):
+            _ret_data = ret.get("data", {}) or {}
+            msg_id = (
+                ret.get("message_id")
+                or _ret_data.get("message_id")
+                or ""
+            )
+        logger.info(
+            f"[{self.instance_id}] 已按缓存节点重建聊天记录到 {target_type} "
+            f"{target_id_str} (nodes={len(nodes)})"
+        )
+        return str(msg_id) if msg_id else "ok"
+
     async def _rebuild_forward_to_target(
         self,
         client,
@@ -278,67 +323,8 @@ class SenderMixin:
             )
             return None
 
-        messages = []
-        if isinstance(detail, dict):
-            data = detail.get("data", detail) or {}
-            messages = data.get("messages") or []
-        if not messages:
-            logger.warning(
-                f"[{self.instance_id}] get_forward_msg 无节点内容 (src={source_msg_id})"
-            )
-            return None
-
-        nodes = []
-        for item in messages:
-            if not isinstance(item, dict):
-                continue
-            # 协议端返回节点的两种常见结构：
-            # 1) {type:node, data:{...}}
-            # 2) {sender:{nickname,user_id}, content/message:[...], time:...}
-            if item.get("type") == "node":
-                node_data = item.get("data") or {}
-                # 统一字段名
-                uin = node_data.get("uin") or node_data.get("user_id") or ""
-                name = (
-                    node_data.get("name")
-                    or node_data.get("nickname")
-                    or str(uin)
-                    or "用户"
-                )
-                content = node_data.get("content") or node_data.get("message") or []
-                time_val = node_data.get("time")
-            else:
-                sender = item.get("sender") or {}
-                uin = sender.get("user_id") or item.get("user_id") or ""
-                name = (
-                    sender.get("nickname")
-                    or sender.get("card")
-                    or str(uin)
-                    or "用户"
-                )
-                content = item.get("content") or item.get("message") or []
-                time_val = item.get("time")
-
-            if isinstance(content, str):
-                content = [{"type": "text", "data": {"text": content}}]
-            if not isinstance(content, list) or not content:
-                continue
-
-            node = {
-                "type": "node",
-                "data": {
-                    "name": str(name),
-                    "uin": str(uin) if uin else str(FALLBACK_NODE_UIN),
-                    "content": content,
-                },
-            }
-            if time_val is not None:
-                try:
-                    node["data"]["time"] = int(time_val)
-                except (TypeError, ValueError):
-                    pass
-            nodes.append(node)
-
+        data = detail.get("data", detail) if isinstance(detail, dict) else {}
+        nodes = normalize_forward_nodes((data or {}).get("messages") or [])
         if not nodes:
             logger.warning(
                 f"[{self.instance_id}] 无法从 get_forward_msg 构造节点 "
@@ -346,34 +332,6 @@ class SenderMixin:
             )
             return None
 
-        action = (
-            "send_private_forward_msg"
-            if target_type == "private"
-            else "send_group_forward_msg"
+        return await self._send_forward_nodes_to_target(
+            client, target_type, target_id_str, nodes
         )
-        params = (
-            {"user_id": int(target_id_str)}
-            if target_type == "private"
-            else {"group_id": int(target_id_str)}
-        )
-        try:
-            ret = await client.api.call_action(action, messages=nodes, **params)
-            msg_id = None
-            if isinstance(ret, dict):
-                _ret_data = ret.get("data", {}) or {}
-                msg_id = (
-                    ret.get("message_id")
-                    or _ret_data.get("message_id")
-                    or ""
-                )
-            logger.info(
-                f"[{self.instance_id}] 已重建发送聊天记录到 {target_type} "
-                f"{target_id_str} (src={source_msg_id}, nodes={len(nodes)})"
-            )
-            return str(msg_id) if msg_id else "ok"
-        except Exception as e:
-            logger.warning(
-                f"[{self.instance_id}] send_*_forward_msg 重建失败 "
-                f"(src={source_msg_id}) -> {target_type} {target_id_str}: {e}"
-            )
-            return None

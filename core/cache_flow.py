@@ -93,9 +93,23 @@ class CacheFlowMixin:
         components = payload.get("components", [])
         client = payload["client"]
 
-        # 原消息本身是「聊天记录」时先留一份中转副本，撤回后据此重建
+        # 原消息本身是「聊天记录」时：先把节点内容取下来随缓存落盘，
+        # 撤回后即使原消息 ID 失效，也能直接重建发送
+        is_forward = self._is_forward_message(raw_message)
+        forward_nodes = (
+            await self._fetch_forward_nodes(client, message_id)
+            if is_forward
+            else None
+        )
+        # 再按配置留一份中转副本（节点优先，取不到节点才用旧接口）
         relay_info = await self._relay_forward_message(
-            client, group_id, message_id, sender_id, timestamp, raw_message
+            client,
+            group_id,
+            message_id,
+            sender_id,
+            timestamp,
+            is_forward=is_forward,
+            forward_nodes=forward_nodes,
         )
 
         media = await self._cache_message_media(client, components, raw_message)
@@ -126,6 +140,7 @@ class CacheFlowMixin:
                 "timestamp": timestamp,
                 "components": serialized_components,
                 "local_file_map": media.local_file_map,
+                "forward_nodes": forward_nodes,
                 "relay_info": relay_info,
             },
         )

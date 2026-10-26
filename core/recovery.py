@@ -1,10 +1,13 @@
 """收到撤回事件 → 恢复内容并通知。
 
-三条恢复路径：
+合并转发（聊天记录）被撤回时，按下面的顺序重建一份发到通知目标：
 
-1. 原消息本身是「聊天记录」且缓存里有中转副本 → 原样转发聊天记录；
-2. 原消息是纯「聊天记录」但没有中转副本 → 按原消息 ID 直接转发；
-3. 普通消息 → 伪造合并转发（单节点聊天记录），失败后再降级到单条转发或组件直发。
+1. 中转群 / Bot 自身私聊里的**中转副本**——平台在发送时重新锚定过媒体，
+   记录里的图片视频最不容易失效，所以优先；
+2. 收到消息时落盘的**节点缓存**——副本被自动撤回、或中转本身失败时的兜底；
+3. 原消息 ID——撤回后基本已失效，只在极端情况下还能读到。
+
+普通消息则走「伪造单节点聊天记录」，失败后再降级到单条转发或组件直发。
 """
 
 import asyncio
@@ -161,31 +164,38 @@ class RecoveryMixin:
             # 原消息本身就是「聊天记录/合并转发」时走此分支：
             # 原样转发聊天记录，不再嵌套伪造一层
             relay_info = cached_data.get("relay_info")
-            if relay_info:
-                await self._recover_forward_recall(ctx, relay_info)
+            forward_nodes = cached_data.get("forward_nodes")
+            if relay_info or forward_nodes:
+                await self._recover_forward_recall(
+                    ctx, relay_info=relay_info, forward_nodes=forward_nodes
+                )
                 return None
 
             await self._recover_plain_recall(ctx)
         return None
 
     async def _recover_forward_recall(
-        self, ctx: RecallContext, relay_info: dict
+        self,
+        ctx: RecallContext,
+        relay_info: dict | None = None,
+        forward_nodes: list | None = None,
     ) -> None:
-        """原消息是合并转发，且有中转副本：重建聊天记录并补撤回提醒。"""
+        """原消息是合并转发：重建聊天记录并补撤回提醒。
+
+        数据源按「中转副本 → 节点缓存 → 原消息 ID」的顺序尝试，
+        见 ``_rebuild_forward_record``。
+        """
         logger.info(
             f"[{self.instance_id}] 检测到合并转发消息被撤回，"
             f"原消息ID: {ctx.message_id}"
         )
-        sender_id = relay_info["sender_id"]
+        relay_info = relay_info or {}
+        sender_id = str(
+            relay_info.get("sender_id") or ctx.cached_data.get("sender_id") or ""
+        )
+        timestamp = relay_info.get("timestamp") or ctx.cached_data.get("timestamp")
 
         relay_msg_id = str(relay_info.get("relay_msg_id") or "")
-        timestamp = relay_info["timestamp"]
-        # 优先用中转群里的副本（撤回后仍可读），其次再试原消息 ID
-        candidate_ids = []
-        for mid in (relay_msg_id, ctx.message_id):
-            mid = str(mid or "").strip()
-            if mid and mid not in candidate_ids:
-                candidate_ids.append(mid)
 
         try:
             client = ctx.client
@@ -203,7 +213,8 @@ class RecoveryMixin:
             logger.info(
                 f"[{self.instance_id}] 合并转发撤回 - 群: {group_name}, "
                 f"发送者: {member_nickname}, "
-                f"操作者: {operator_nickname} ({ctx.operator_id})"
+                f"操作者: {operator_nickname} ({ctx.operator_id}), "
+                f"缓存节点: {len(forward_nodes) if forward_nodes else 0}"
             )
 
             targets = self.settings.targets()
@@ -221,8 +232,13 @@ class RecoveryMixin:
                     message_type=describe_message_type(is_forward=True),
                 )
 
-                forwarded_msg_id = await self._forward_single_msg_to_target(
-                    client, target_type, target_id_str, candidate_ids
+                forwarded_msg_id = await self._rebuild_forward_record(
+                    client,
+                    target_type,
+                    target_id_str,
+                    relay_msg_id,
+                    forward_nodes,
+                    ctx.message_id,
                 )
                 if forwarded_msg_id:
                     logger.info(
@@ -301,6 +317,58 @@ class RecoveryMixin:
 
         except Exception as e:
             logger.error(f"[{self.instance_id}] 处理合并转发撤回失败: {e}")
+
+    async def _rebuild_forward_record(
+        self,
+        client,
+        target_type: str,
+        target_id_str: str,
+        relay_msg_id: str,
+        forward_nodes: list | None,
+        origin_msg_id: str,
+    ) -> str | None:
+        """按「中转副本 → 节点缓存 → 原消息」的顺序重建一条聊天记录。
+
+        中转副本优先：它是在中转群/自身私聊里重新发出去的一条消息，
+        平台发送时已经把媒体重新上传锚定过，记录里的图片视频最不容易失效。
+        """
+        if relay_msg_id:
+            msg_id = await self._rebuild_forward_to_target(
+                client, target_type, target_id_str, relay_msg_id
+            )
+            if msg_id:
+                logger.info(
+                    f"[{self.instance_id}] 已从中转副本重建聊天记录 "
+                    f"(副本ID: {relay_msg_id})"
+                )
+                return msg_id
+
+        if forward_nodes:
+            msg_id = await self._send_forward_nodes_to_target(
+                client, target_type, target_id_str, forward_nodes
+            )
+            if msg_id:
+                logger.info(
+                    f"[{self.instance_id}] 中转副本不可用，改用节点缓存重建聊天记录 "
+                    f"({len(forward_nodes)} 个节点)"
+                )
+                return msg_id
+
+        if origin_msg_id:
+            msg_id = await self._rebuild_forward_to_target(
+                client, target_type, target_id_str, origin_msg_id
+            )
+            if msg_id:
+                logger.info(
+                    f"[{self.instance_id}] 已按原消息 ID 重建聊天记录 "
+                    f"({origin_msg_id})"
+                )
+                return msg_id
+
+        # 最后一档：原生单条转发（部分协议端对合并转发也支持）
+        return await self._forward_single_msg_to_target(
+            client, target_type, target_id_str, [origin_msg_id]
+        )
 
     async def _recover_plain_recall(self, ctx: RecallContext) -> None:
         """普通消息的撤回恢复。"""

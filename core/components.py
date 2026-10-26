@@ -9,7 +9,7 @@ import aiohttp
 
 from astrbot.api import logger
 
-from .constants import COMPONENT_MAP, GOCQ_PART_PLACEHOLDER
+from .constants import COMPONENT_MAP, FALLBACK_NODE_UIN, GOCQ_PART_PLACEHOLDER
 from .media import download_and_cache_image
 
 
@@ -226,6 +226,70 @@ async def component_to_gocq_parts(
     return gocq_parts
 
 
+def normalize_forward_nodes(messages) -> List[Dict]:
+    """把 ``get_forward_msg`` 返回的节点列表规范成可再次发送的 node 段。
+
+    协议端返回的节点结构有两种常见形态：
+
+    1. ``{"type": "node", "data": {...}}``
+    2. ``{"sender": {"nickname", "user_id"}, "content"/"message": [...], "time": ...}``
+
+    统一输出 ``{"type": "node", "data": {name, uin, content, time}}``，
+    可直接用于 ``send_group_forward_msg`` / ``send_private_forward_msg``。
+    """
+    nodes: List[Dict] = []
+    if not isinstance(messages, list):
+        return nodes
+
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "node":
+            node_data = item.get("data") or {}
+            uin = node_data.get("uin") or node_data.get("user_id") or ""
+            name = (
+                node_data.get("name")
+                or node_data.get("nickname")
+                or str(uin)
+                or "用户"
+            )
+            content = node_data.get("content") or node_data.get("message") or []
+            time_val = node_data.get("time")
+        else:
+            sender = item.get("sender") or {}
+            uin = sender.get("user_id") or item.get("user_id") or ""
+            name = (
+                sender.get("nickname")
+                or sender.get("card")
+                or str(uin)
+                or "用户"
+            )
+            content = item.get("content") or item.get("message") or []
+            time_val = item.get("time")
+
+        if isinstance(content, str):
+            content = [{"type": "text", "data": {"text": content}}]
+        if not isinstance(content, list) or not content:
+            continue
+
+        node = {
+            "type": "node",
+            "data": {
+                "name": str(name),
+                "uin": str(uin) if uin else str(FALLBACK_NODE_UIN),
+                "content": content,
+            },
+        }
+        if time_val is not None:
+            try:
+                node["data"]["time"] = int(time_val)
+            except (TypeError, ValueError):
+                pass
+        nodes.append(node)
+
+    return nodes
+
+
 def extract_plain_text(components: list) -> str:
     """提取消息中的纯文本内容（含 @），用于关键词匹配。"""
     if not components:
@@ -387,6 +451,7 @@ __all__ = [
     "serialize_components",
     "deserialize_components",
     "component_to_gocq_parts",
+    "normalize_forward_nodes",
     "extract_plain_text",
     "describe_message_type",
     "message_to_plain_text",
