@@ -165,7 +165,14 @@ class RecoveryMixin:
             # 原样转发聊天记录，不再嵌套伪造一层
             relay_info = cached_data.get("relay_info")
             forward_nodes = cached_data.get("forward_nodes")
-            if relay_info or forward_nodes:
+            # 兜底判断：节点/中转都没留下，但缓存里明确记着 Forward 组件，
+            # 说明这是一条聊天记录，绝不能掉进「按组件分条发送」的普通消息路径
+            cached_types = {
+                str(comp.get("type"))
+                for comp in (cached_data.get("components") or [])
+                if isinstance(comp, dict)
+            }
+            if relay_info or forward_nodes or "Forward" in cached_types:
                 await self._recover_forward_recall(
                     ctx, relay_info=relay_info, forward_nodes=forward_nodes
                 )
@@ -365,10 +372,14 @@ class RecoveryMixin:
                 )
                 return msg_id
 
-        # 最后一档：原生单条转发（部分协议端对合并转发也支持）
-        return await self._forward_single_msg_to_target(
-            client, target_type, target_id_str, [origin_msg_id]
+        # 不再用 forward_*_single_msg 兜底：部分协议端会把聊天记录拆成
+        # 一条条普通消息发出去，比「转发失败」更糟。这里直接返回 None，
+        # 由调用方发一条说明文本。
+        logger.warning(
+            f"[{self.instance_id}] 聊天记录重建失败（副本/节点/原消息 ID 均不可用），"
+            f"已改为发送说明文本，避免把记录拆开"
         )
+        return None
 
     async def _recover_plain_recall(self, ctx: RecallContext) -> None:
         """普通消息的撤回恢复。"""

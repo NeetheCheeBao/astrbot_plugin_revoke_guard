@@ -18,7 +18,7 @@ import asyncio
 
 from astrbot.api import logger
 
-from .components import normalize_forward_nodes
+from .components import normalize_forward_nodes, sanitize_forward_nodes
 
 
 def extract_message_id(ret) -> str:
@@ -35,17 +35,23 @@ class RelayMixin:
 
     @staticmethod
     def _is_forward_message(raw_message) -> bool:
-        """原始消息是否是一条合并转发（聊天记录）。"""
+        """原始消息是否是一条合并转发（聊天记录）。
+
+        不能只看 ``message[0]``：带回复/@ 的聊天记录、或某些协议端把段包了一层时，
+        第一段并不是 ``forward``，只判首段会漏掉整条消息（表现为「没中转、撤回后
+        只剩一条不支持的组件提示」）。这里扫描全部消息段。
+        """
         if not isinstance(raw_message, dict):
             return False
-        message_list = raw_message.get("message", [])
+        message_list = raw_message.get("message")
+        if isinstance(message_list, dict):
+            message_list = [message_list]
         if not isinstance(message_list, list) or not message_list:
             return False
-        first_segment = message_list[0]
-        return (
-            isinstance(first_segment, dict)
-            and first_segment.get("type") == "forward"
-        )
+        for segment in message_list:
+            if isinstance(segment, dict) and segment.get("type") == "forward":
+                return True
+        return False
 
     async def _fetch_forward_nodes(self, client, message_id: str) -> list | None:
         """用 ``get_forward_msg`` 取出聊天记录节点，失败返回 None。
@@ -101,22 +107,39 @@ class RelayMixin:
     ) -> dict | None:
         """原消息是合并转发时做中转，返回 relay_info（无需中转时返回 None）。
 
-        ``forward_nodes`` 由调用方预先取好；为 None 表示节点没取到，
-        此时才回退到 ``forward_*_single_msg``。
+        ``forward_nodes`` 由调用方预先取好；为 None 表示节点没取到。
+
+        **中转目标严格按配置二选一**，不会互相兜底：配置成「中转到群聊」就绝不
+        往 Bot 自身私聊发（反过来也一样），避免出现「明明配了中转群，却在私聊里
+        看到记录」的情况。
         """
         if not is_forward:
             return None
 
-        relay_info = None
-        if self.settings.forward_to_self:
-            relay_info = await self._relay_to_self(
+        node_count = len(forward_nodes) if forward_nodes else 0
+        relay_group = self.settings.forward_relay_group
+
+        if self.settings.relay_mode == "中转到群聊":
+            if not relay_group:
+                logger.warning(
+                    f"[{self.instance_id}] 中转方式为「中转到群聊」但未填写中转群号，"
+                    f"已跳过中转（节点缓存已留存，撤回时仍可重建）"
+                )
+                return None
+            logger.info(
+                f"[{self.instance_id}] 合并转发中转：中转到群聊 {relay_group}，"
+                f"节点数={node_count}"
+            )
+            return await self._relay_to_group(
                 client, group_id, message_id, sender_id, timestamp, forward_nodes
             )
-        if not relay_info and self.settings.forward_relay_group:
-            relay_info = await self._relay_to_group(
-                client, group_id, message_id, sender_id, timestamp, forward_nodes
-            )
-        return relay_info
+
+        logger.info(
+            f"[{self.instance_id}] 合并转发中转：中转给Bot自身，节点数={node_count}"
+        )
+        return await self._relay_to_self(
+            client, group_id, message_id, sender_id, timestamp, forward_nodes
+        )
 
     async def _forward_merged_copy(
         self,
@@ -126,33 +149,57 @@ class RelayMixin:
         forward_nodes: list | None,
         message_id: str,
     ):
-        """把一份聊天记录副本转发到目标会话。
+        """把一份聊天记录副本转发到目标会话，**只走节点重建**。
 
-        有节点时用 ``send_*_forward_msg`` 重建（稳定，且能拿到 message_id）；
-        没节点时才退回 ``forward_*_single_msg``。
+        这里绝不能退化成 ``forward_*_single_msg``：部分协议端对合并转发会走
+        ``forwardMsgWithComment``，要么超时，要么把记录**拆成一条条普通消息**
+        发出去（用户看到的就是「合并消息被拆开逐个发送」）。
+        节点拿不到时宁可跳过中转——节点缓存已经落盘，撤回时照样能重建。
+
+        返回协议端原始返回值；没发出去时返回 None。
         """
         if target_type == "private":
             params = {"user_id": int(target_id_str)}
             rebuild_action = "send_private_forward_msg"
-            single_action = "forward_friend_single_msg"
         else:
             params = {"group_id": int(target_id_str)}
             rebuild_action = "send_group_forward_msg"
-            single_action = "forward_group_single_msg"
 
-        if forward_nodes:
-            try:
-                return await client.api.call_action(
-                    rebuild_action, messages=forward_nodes, **params
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"[{self.instance_id}] 用节点重建聊天记录失败，"
-                    f"回退单条转发: {exc}"
-                )
-        return await client.api.call_action(
-            single_action, message_id=message_id, **params
-        )
+        nodes = forward_nodes
+        if not nodes:
+            # 节点由调用方在收到消息时预取过；这里不再重试，避免白等一轮超时。
+            # 宁可跳过中转——节点缓存已经落盘，撤回时照样能重建。
+            logger.warning(
+                f"[{self.instance_id}] 取不到聊天记录节点，跳过中转 -> "
+                f"{target_type} {target_id_str} (原消息ID: {message_id or '-'})"
+                f"（不使用单条转发，避免把记录拆开）"
+            )
+            return None
+
+        try:
+            return await client.api.call_action(
+                rebuild_action, messages=nodes, **params
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{self.instance_id}] 用节点重建聊天记录失败，"
+                f"改用精简节点重试 -> {target_type} {target_id_str}: {exc}"
+            )
+
+        sanitized_nodes = sanitize_forward_nodes(nodes)
+        if not sanitized_nodes:
+            return None
+        try:
+            return await client.api.call_action(
+                rebuild_action, messages=sanitized_nodes, **params
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[{self.instance_id}] 精简节点重建仍失败 -> "
+                f"{target_type} {target_id_str}: {exc}"
+                f"（节点缓存已留存，撤回时仍可重建）"
+            )
+            return None
 
     async def _relay_to_self(
         self,
@@ -172,6 +219,9 @@ class RelayMixin:
                 ret = await self._forward_merged_copy(
                     client, "private", str(self_id), forward_nodes, message_id
                 )
+                if ret is None:
+                    # 根本没发出去，倒查历史只会捞到无关消息，直接放弃
+                    break
                 relay_msg_id = extract_message_id(ret)
                 if not relay_msg_id:
                     await asyncio.sleep(1)
@@ -244,6 +294,9 @@ class RelayMixin:
                 f"(中转群: {relay_group}): {exc}"
                 "（节点缓存已留存，撤回时仍可重建）"
             )
+            return None
+
+        if ret is None:
             return None
 
         relay_msg_id = extract_message_id(ret)

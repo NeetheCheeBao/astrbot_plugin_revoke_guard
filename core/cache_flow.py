@@ -26,6 +26,18 @@ class CacheFlowMixin:
         if self.settings.should_skip_cache(group_id, event.get_message_type()):
             return None
 
+        # 中转群会被插件自己写入中转副本：若不跳过 Bot 自己的消息，
+        # 每份副本都会再触发一次「缓存 → 中转」，形成无限转发。
+        relay_group = self.settings.forward_relay_group
+        if relay_group and group_id == relay_group:
+            self_id = await self._get_self_id(event.bot)
+            if self_id and sender_id == self_id:
+                logger.debug(
+                    f"[{self.instance_id}] 跳过 Bot 自身在中转群的消息 "
+                    f"(群: {group_id}, 消息ID: {message_id})"
+                )
+                return None
+
         message_obj = event.get_messages()
         components = (
             message_obj.components

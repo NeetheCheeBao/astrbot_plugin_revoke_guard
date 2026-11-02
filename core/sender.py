@@ -7,7 +7,11 @@ import aiohttp
 
 from astrbot.api import logger
 
-from .components import component_to_gocq_parts, normalize_forward_nodes
+from .components import (
+    component_to_gocq_parts,
+    normalize_forward_nodes,
+    sanitize_forward_nodes,
+)
 from .constants import FALLBACK_NODE_UIN
 
 
@@ -287,10 +291,22 @@ class SenderMixin:
             ret = await client.api.call_action(action, messages=nodes, **params)
         except Exception as e:
             logger.warning(
-                f"[{self.instance_id}] 按缓存节点重建聊天记录失败 "
-                f"-> {target_type} {target_id_str}: {e}"
+                f"[{self.instance_id}] 按缓存节点重建聊天记录失败，"
+                f"改用精简节点重试 -> {target_type} {target_id_str}: {e}"
             )
-            return None
+            sanitized_nodes = sanitize_forward_nodes(nodes)
+            if not sanitized_nodes:
+                return None
+            try:
+                ret = await client.api.call_action(
+                    action, messages=sanitized_nodes, **params
+                )
+            except Exception as retry_error:
+                logger.warning(
+                    f"[{self.instance_id}] 精简节点重建聊天记录仍失败 "
+                    f"-> {target_type} {target_id_str}: {retry_error}"
+                )
+                return None
         msg_id = None
         if isinstance(ret, dict):
             _ret_data = ret.get("data", {}) or {}

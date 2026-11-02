@@ -272,11 +272,21 @@ def normalize_forward_nodes(messages) -> List[Dict]:
         if not isinstance(content, list) or not content:
             continue
 
+        # 两组字段都填：部分协议端以 user_id(数值)+nickname 识别节点发言人，
+        # 另有实现用 uin+name（与伪造聊天记录保持一致）
+        uin_str = str(uin) if uin else str(FALLBACK_NODE_UIN)
+        try:
+            uin_int = int(uin_str)
+        except (TypeError, ValueError):
+            uin_int = FALLBACK_NODE_UIN
+
         node = {
             "type": "node",
             "data": {
+                "user_id": uin_int,
+                "nickname": str(name),
                 "name": str(name),
-                "uin": str(uin) if uin else str(FALLBACK_NODE_UIN),
+                "uin": uin_str,
                 "content": content,
             },
         }
@@ -288,6 +298,99 @@ def normalize_forward_nodes(messages) -> List[Dict]:
         nodes.append(node)
 
     return nodes
+
+
+# 重建聊天记录时，各消息段真正必需的字段。
+# ``get_forward_msg`` 返回的段里常带一堆内部字段（file_uuid / md5 / emoji_id …），
+# 个别协议端会因此直接拒收整条聊天记录，所以失败后按这张表裁剪再试一次。
+_NODE_SEGMENT_KEYS = {
+    "text": ("text",),
+    "face": ("id",),
+    "at": ("qq", "name"),
+    "image": ("file", "url", "path", "sub_type", "summary"),
+    "record": ("file", "url", "path"),
+    "video": ("file", "url", "path"),
+    "file": ("file", "url", "name"),
+    "json": ("data",),
+    "xml": ("data",),
+    "reply": ("id",),
+}
+
+
+def sanitize_forward_nodes(nodes) -> List[Dict]:
+    """把聊天记录节点裁剪成「最小可用」形态，用于原样重建失败后的重试。
+
+    - 只保留各段必需字段；
+    - 嵌套的聊天记录（``forward`` 段）重建不出来，替换成文本占位；
+    - 认不出的段直接丢弃。
+    """
+    cleaned_nodes: List[Dict] = []
+    if not isinstance(nodes, list):
+        return cleaned_nodes
+
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_data = node.get("data") if isinstance(node.get("data"), dict) else {}
+        content = node_data.get("content") or node_data.get("message") or []
+        if isinstance(content, str):
+            content = [{"type": "text", "data": {"text": content}}]
+        if not isinstance(content, list):
+            continue
+
+        cleaned_content: List[Dict] = []
+        for segment in content:
+            if not isinstance(segment, dict):
+                continue
+            segment_type = str(segment.get("type") or "")
+            segment_data = (
+                segment.get("data") if isinstance(segment.get("data"), dict) else {}
+            )
+            if segment_type == "forward":
+                cleaned_content.append(
+                    {"type": "text", "data": {"text": "[聊天记录]"}}
+                )
+                continue
+            allowed_keys = _NODE_SEGMENT_KEYS.get(segment_type)
+            if not allowed_keys:
+                continue
+            trimmed = {
+                key: value
+                for key, value in segment_data.items()
+                if key in allowed_keys and value not in (None, "")
+            }
+            if not trimmed:
+                continue
+            cleaned_content.append({"type": segment_type, "data": trimmed})
+
+        if not cleaned_content:
+            continue
+
+        uin = node_data.get("user_id") or node_data.get("uin") or FALLBACK_NODE_UIN
+        name = node_data.get("nickname") or node_data.get("name") or str(uin)
+        try:
+            uin_int = int(uin)
+        except (TypeError, ValueError):
+            uin_int = FALLBACK_NODE_UIN
+
+        cleaned_node = {
+            "type": "node",
+            "data": {
+                "user_id": uin_int,
+                "nickname": str(name),
+                "name": str(name),
+                "uin": str(uin_int),
+                "content": cleaned_content,
+            },
+        }
+        if node_data.get("time") is not None:
+            try:
+                cleaned_node["data"]["time"] = int(node_data["time"])
+            except (TypeError, ValueError):
+                pass
+        cleaned_nodes.append(cleaned_node)
+
+    return cleaned_nodes
 
 
 def extract_plain_text(components: list) -> str:
@@ -452,6 +555,7 @@ __all__ = [
     "deserialize_components",
     "component_to_gocq_parts",
     "normalize_forward_nodes",
+    "sanitize_forward_nodes",
     "extract_plain_text",
     "describe_message_type",
     "message_to_plain_text",
