@@ -40,3 +40,7 @@ astrbot_plugin_revoke_guard/
 ├── logo.png
 └── LICENSE
 ```
+
+## ⚖️ 许可证
+
+本项目采用 GPLv3 许可证 - 详情请参阅 [LICENSE](LICENSE) 文件。
