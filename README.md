@@ -1,6 +1,6 @@
 <div align="center">
-<h1>astrbot_plugin_revoke_guard</h1>
 <img src="logo.png" alt="logo" width="128">
+<h1>astrbot_plugin_revoke_guard</h1>
 <h3>QQ群消息撤回监控（防撤回）</h3>
 
 [![License](https://img.shields.io/badge/License-GPLv3-blue?style=flat-square)](LICENSE)
